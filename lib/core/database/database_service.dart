@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:math';
+import 'dart:typed_data';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
@@ -40,8 +43,46 @@ class DatabaseService {
             created_at TEXT
           )
         ''');
+        await db.execute('''
+          CREATE TABLE settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+          )
+        ''');
       },
     );
+  }
+
+  Future<Uint8List> getGlobalSalt() async {
+    final db = await database;
+
+    // Ensure settings table exists (for existing users)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )
+    ''');
+
+    final List<Map<String, dynamic>> maps = await db.query(
+      'settings',
+      where: 'key = ?',
+      whereArgs: ['global_salt'],
+    );
+
+    if (maps.isNotEmpty) {
+      return base64Decode(maps.first['value'] as String);
+    } else {
+      // Generate new global salt
+      final salt = Uint8List(16);
+      final random = Random.secure();
+      for (var i = 0; i < 16; i++) {
+        salt[i] = random.nextInt(256);
+      }
+      final saltBase64 = base64Encode(salt);
+      await db.insert('settings', {'key': 'global_salt', 'value': saltBase64});
+      return salt;
+    }
   }
 
   Future<int> insertNote(Note note) async {

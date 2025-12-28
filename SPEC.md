@@ -10,9 +10,10 @@
 - Language: English only
 
 ## 2. Core Encryption Stack
-- Key Derivation (KDF): Argon2id
-    - Parameters: 64MB Memory, 3 Iterations, 4 Parallelism
-    - Purpose: Prevent GPU/specialized hardware brute-force
+- Key Derivation (KDF): 
+    - **Master Key**: Argon2id (64MB Memory, 3 Iterations, 4 Parallelism) with a **Device-Specific Global Salt**.
+    - **Per-Entry Key**: **HKDF (HMAC-SHA256)** derived from Master Key and unique entry salt.
+    - Purpose: Balance extreme brute-force resistance with high-performance UI rendering.
 - Symmetric Encryption: AES-256-GCM
     - Purpose: Encrypt text content and all metadata
     - Features: Quantum-Resistant (AES-256) and data integrity verification
@@ -31,7 +32,9 @@
 ## 4. Extreme Privacy & Security Rules
 - Anti-Screenshot: Android FLAG_SECURE enabled, iOS screen recording detection/blur
 - Clipboard: Automatically clear system clipboard 60 seconds after copying
-- Memory Safety: Erase plaintext strings from RAM immediately when app goes to background or page is closed
+- Memory Safety: 
+    - **Zero-Password Policy**: Raw password strings are wiped from RAM immediately after Master Key derivation.
+    - **Master Key Management**: Only the derived binary Master Key (Uint8List) is held in memory during the unlocked session and is cleared upon locking or backgrounding.
 - System Decoupling: Disable iOS Spotlight and Android Global Search indexing
 - Input Security: Disable system keyboard auto-prediction and cloud suggestions
 - UI/UX: Modern, minimalist Material 3 design; content-only texts (no titles); support for text deletion and debounced save actions.

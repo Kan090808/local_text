@@ -54,6 +54,7 @@ class _NotesPageState extends ConsumerState<NotesPage>
     with WidgetsBindingObserver {
   final TextEditingController _passwordController = TextEditingController();
   bool _isUnlocked = false;
+  bool _isUnlocking = false;
   Timer? _clipboardTimer;
 
   @override
@@ -80,17 +81,42 @@ class _NotesPageState extends ConsumerState<NotesPage>
     }
   }
 
-  void _unlock() {
-    if (_passwordController.text.isNotEmpty) {
-      ref.read(passwordProvider.notifier).setPassword(_passwordController.text);
+  void _unlock() async {
+    if (_passwordController.text.isNotEmpty && !_isUnlocking) {
+      final password = _passwordController.text;
       setState(() {
-        _isUnlocked = true;
+        _isUnlocking = true;
       });
+
+      try {
+        final repo = ref.read(notesRepositoryProvider);
+        final salt = await repo.getGlobalSalt();
+        final masterKey = await repo.deriveMasterKey(password, salt);
+
+        ref.read(masterKeyProvider.notifier).setMasterKey(masterKey);
+        _passwordController.clear();
+
+        if (mounted) {
+          setState(() {
+            _isUnlocked = true;
+            _isUnlocking = false;
+          });
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _isUnlocking = false;
+          });
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Unlock failed: $e')));
+        }
+      }
     }
   }
 
   void _lock() {
-    ref.read(passwordProvider.notifier).setPassword('');
+    ref.read(masterKeyProvider.notifier).clear();
     _passwordController.clear();
     setState(() {
       _isUnlocked = false;
@@ -165,7 +191,7 @@ class _NotesPageState extends ConsumerState<NotesPage>
                 shape: BoxShape.circle,
               ),
               child: Icon(
-                Icons.lock_person_rounded,
+                Icons.cloud_off_rounded,
                 size: 64,
                 color: Theme.of(context).colorScheme.onPrimaryContainer,
               ),
@@ -203,15 +229,27 @@ class _NotesPageState extends ConsumerState<NotesPage>
             ),
             const SizedBox(height: 24),
             FilledButton.icon(
-              onPressed: _unlock,
+              onPressed: _isUnlocking ? null : _unlock,
               style: FilledButton.styleFrom(
                 minimumSize: const Size(double.infinity, 56),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(16),
                 ),
               ),
-              icon: const Icon(Icons.login_rounded),
-              label: const Text('Unlock', style: TextStyle(fontSize: 16)),
+              icon: _isUnlocking
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.login_rounded),
+              label: Text(
+                _isUnlocking ? 'Unlocking...' : 'Unlock',
+                style: const TextStyle(fontSize: 16),
+              ),
             ),
           ],
         ),
@@ -288,12 +326,17 @@ class _NotesPageState extends ConsumerState<NotesPage>
                           });
                           try {
                             final repo = ref.read(notesRepositoryProvider);
-                            await repo.addNote(
-                              contentController.text,
-                              ref.read(passwordProvider),
-                            );
-                            ref.invalidate(decryptedNotesProvider);
-                            if (context.mounted) Navigator.pop(context);
+                            final masterKey = ref.read(masterKeyProvider);
+                            if (masterKey != null) {
+                              await repo.addNote(
+                                contentController.text,
+                                masterKey,
+                              );
+                              ref.invalidate(decryptedNotesProvider);
+                              if (context.mounted) Navigator.pop(context);
+                            } else {
+                              throw Exception('Master key not available');
+                            }
                           } catch (e) {
                             setModalState(() {
                               isSaving = false;

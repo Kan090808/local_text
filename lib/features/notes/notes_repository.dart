@@ -10,21 +10,31 @@ class NotesRepository {
   final DatabaseService _dbService = DatabaseService();
   final SecurityService _securityService = SecurityService();
 
-  Future<void> addNote(String content, String password) async {
-    // Generate a random salt
+  Future<Uint8List> getGlobalSalt() async {
+    return await _dbService.getGlobalSalt();
+  }
+
+  Future<Uint8List> deriveMasterKey(
+    String password,
+    Uint8List globalSalt,
+  ) async {
+    return await _securityService.deriveMasterKey(password, globalSalt);
+  }
+
+  Future<void> addNote(String content, Uint8List masterKey) async {
+    // Generate a random salt for this specific note
     final salt = Uint8List(16);
     final random = Random.secure();
     for (var i = 0; i < 16; i++) {
       salt[i] = random.nextInt(256);
     }
 
-    // Derive key
-    final keyBytes = await _securityService.deriveKey(password, salt);
-    final secretKey = SecretKey(keyBytes);
+    // Derive per-note key using HKDF (very fast)
+    final noteKey = await _securityService.deriveNoteKey(masterKey, salt);
 
     final secretBox = await _securityService.encrypt(
       utf8.encode(content),
-      secretKey,
+      noteKey,
     );
 
     final note = Note(
@@ -38,14 +48,16 @@ class NotesRepository {
     await _dbService.insertNote(note);
   }
 
-  Future<List<DecryptedNote>> getDecryptedNotes(String password) async {
+  Future<List<DecryptedNote>> getDecryptedNotes(Uint8List masterKey) async {
     final allNotes = await _dbService.getAllNotes();
     final List<DecryptedNote> decryptedNotes = [];
 
     for (final note in allNotes) {
-      // Derive key for this note using its salt
-      final keyBytes = await _securityService.deriveKey(password, note.salt);
-      final secretKey = SecretKey(keyBytes);
+      // Derive per-note key using HKDF (very fast)
+      final noteKey = await _securityService.deriveNoteKey(
+        masterKey,
+        note.salt,
+      );
 
       final secretBox = SecretBox(
         note.encryptedContent,
@@ -53,10 +65,7 @@ class NotesRepository {
         mac: Mac(note.mac),
       );
 
-      final decryptedData = await _securityService.decrypt(
-        secretBox,
-        secretKey,
-      );
+      final decryptedData = await _securityService.decrypt(secretBox, noteKey);
 
       if (decryptedData != null) {
         try {
