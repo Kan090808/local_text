@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_windowmanager/flutter_windowmanager.dart';
 import 'dart:io';
 import 'dart:async';
+import 'dart:ui';
 import 'features/notes/notes_provider.dart';
 import 'features/notes/note_model.dart';
 
@@ -55,6 +56,7 @@ class _NotesPageState extends ConsumerState<NotesPage>
   final TextEditingController _passwordController = TextEditingController();
   bool _isUnlocked = false;
   bool _isUnlocking = false;
+  bool _shouldBlur = false;
   Timer? _clipboardTimer;
 
   @override
@@ -69,6 +71,7 @@ class _NotesPageState extends ConsumerState<NotesPage>
     _passwordController.clear();
     _passwordController.dispose();
     _clipboardTimer?.cancel();
+    _clearClipboard(); // Ensure clipboard is cleared on dispose
     super.dispose();
   }
 
@@ -78,23 +81,49 @@ class _NotesPageState extends ConsumerState<NotesPage>
         state == AppLifecycleState.inactive) {
       // Security: Lock app when it goes to background
       _lock();
+      // Security: Clear clipboard immediately on exit
+      _clearClipboard();
+      setState(() {
+        _shouldBlur = true;
+      });
+    } else if (state == AppLifecycleState.resumed) {
+      setState(() {
+        _shouldBlur = false;
+      });
     }
+  }
+
+  void _clearClipboard() {
+    Clipboard.setData(const ClipboardData(text: ''));
+    _clipboardTimer?.cancel();
   }
 
   void _unlock() async {
     if (_passwordController.text.isNotEmpty && !_isUnlocking) {
       final password = _passwordController.text;
+      _passwordController
+          .clear(); // Clear immediately to reduce memory exposure
+
       setState(() {
         _isUnlocking = true;
       });
 
       try {
+        // Anti-Brute Force: Mandatory delay to slow down automated attacks
+        // Also provides a better UX by showing the loading state clearly
+        final startTime = DateTime.now();
+
         final repo = ref.read(notesRepositoryProvider);
         final salt = await repo.getGlobalSalt();
         final masterKey = await repo.deriveMasterKey(password, salt);
 
+        // Ensure the "unlocking" animation lasts at least 800ms
+        final elapsed = DateTime.now().difference(startTime).inMilliseconds;
+        if (elapsed < 800) {
+          await Future.delayed(Duration(milliseconds: 800 - elapsed));
+        }
+
         ref.read(masterKeyProvider.notifier).setMasterKey(masterKey);
-        _passwordController.clear();
 
         if (mounted) {
           setState(() {
@@ -134,7 +163,7 @@ class _NotesPageState extends ConsumerState<NotesPage>
 
     _clipboardTimer?.cancel();
     _clipboardTimer = Timer(const Duration(seconds: 60), () {
-      Clipboard.setData(const ClipboardData(text: ''));
+      _clearClipboard();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -148,32 +177,53 @@ class _NotesPageState extends ConsumerState<NotesPage>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          'Local Text',
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
-        centerTitle: true,
-        actions: [
-          if (_isUnlocked)
-            IconButton(
-              icon: const Icon(Icons.lock_outline),
-              onPressed: _lock,
-              tooltip: 'Lock App',
+    return Stack(
+      children: [
+        Scaffold(
+          appBar: AppBar(
+            title: const Text(
+              'Local Text',
+              style: TextStyle(fontWeight: FontWeight.bold),
             ),
-        ],
-      ),
-      body: _isUnlocked
-          ? DecryptedTextsList(onCopy: _copyToClipboard)
-          : _buildUnlockScreen(),
-      floatingActionButton: _isUnlocked
-          ? FloatingActionButton.extended(
-              onPressed: () => _showAddTextDialog(context),
-              label: const Text('New Text'),
-              icon: const Icon(Icons.add),
-            )
-          : null,
+            centerTitle: true,
+            actions: [
+              if (_isUnlocked)
+                IconButton(
+                  icon: const Icon(Icons.lock_outline),
+                  onPressed: _lock,
+                  tooltip: 'Lock App',
+                ),
+            ],
+          ),
+          body: _isUnlocked
+              ? DecryptedTextsList(onCopy: _copyToClipboard)
+              : _buildUnlockScreen(),
+          floatingActionButton: _isUnlocked
+              ? FloatingActionButton.extended(
+                  onPressed: () => _showAddTextDialog(context),
+                  label: const Text('New Text'),
+                  icon: const Icon(Icons.add),
+                )
+              : null,
+        ),
+        // iOS Screen Protection: Show a blur/overlay when app is inactive
+        if (_shouldBlur)
+          Positioned.fill(
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+              child: Container(
+                color: Colors.black.withAlpha(150),
+                child: const Center(
+                  child: Icon(
+                    Icons.lock_rounded,
+                    size: 80,
+                    color: Colors.white54,
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 
@@ -258,118 +308,137 @@ class _NotesPageState extends ConsumerState<NotesPage>
   }
 
   void _showAddTextDialog(BuildContext context) {
-    final contentController = TextEditingController();
-    bool isSaving = false;
-
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setModalState) => Container(
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-          ),
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(context).viewInsets.bottom,
-            left: 24,
-            right: 24,
-            top: 24,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+      builder: (context) => _AddNoteSheet(
+        onSave: (content) async {
+          final repo = ref.read(notesRepositoryProvider);
+          final masterKey = ref.read(masterKeyProvider);
+          if (masterKey != null) {
+            await repo.addNote(content, masterKey);
+            ref.invalidate(decryptedNotesProvider);
+          } else {
+            throw Exception('Master key not available');
+          }
+        },
+      ),
+    );
+  }
+}
+
+class _AddNoteSheet extends StatefulWidget {
+  final Future<void> Function(String) onSave;
+  const _AddNoteSheet({required this.onSave});
+
+  @override
+  State<_AddNoteSheet> createState() => _AddNoteSheetState();
+}
+
+class _AddNoteSheetState extends State<_AddNoteSheet> {
+  final _contentController = TextEditingController();
+  bool _isSaving = false;
+
+  @override
+  void dispose() {
+    _contentController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom,
+        left: 24,
+        right: 24,
+        top: 24,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'New Text',
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.close),
-                  ),
-                ],
+              Text(
+                'New Text',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: contentController,
-                decoration: InputDecoration(
-                  hintText: 'Write your secret here...',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: BorderSide.none,
-                  ),
-                  filled: true,
-                  fillColor: Theme.of(
-                    context,
-                  ).colorScheme.surfaceContainerHighest,
-                ),
-                maxLines: 8,
-                autofocus: true,
-                enableSuggestions: false,
-                autocorrect: false,
+              IconButton(
+                onPressed: () => Navigator.pop(context),
+                icon: const Icon(Icons.close),
               ),
-              const SizedBox(height: 24),
-              FilledButton(
-                onPressed: isSaving
-                    ? null
-                    : () async {
-                        if (contentController.text.isNotEmpty) {
-                          setModalState(() {
-                            isSaving = true;
-                          });
-                          try {
-                            final repo = ref.read(notesRepositoryProvider);
-                            final masterKey = ref.read(masterKeyProvider);
-                            if (masterKey != null) {
-                              await repo.addNote(
-                                contentController.text,
-                                masterKey,
-                              );
-                              ref.invalidate(decryptedNotesProvider);
-                              if (context.mounted) Navigator.pop(context);
-                            } else {
-                              throw Exception('Master key not available');
-                            }
-                          } catch (e) {
-                            setModalState(() {
-                              isSaving = false;
-                            });
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text('Error saving: $e')),
-                              );
-                            }
-                          }
-                        }
-                      },
-                style: FilledButton.styleFrom(
-                  minimumSize: const Size(double.infinity, 56),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                ),
-                child: isSaving
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : const Text('Encrypt & Save'),
-              ),
-              const SizedBox(height: 24),
             ],
           ),
-        ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _contentController,
+            decoration: InputDecoration(
+              hintText: 'Write your secret here...',
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide.none,
+              ),
+              filled: true,
+              fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+            ),
+            maxLines: 8,
+            autofocus: true,
+            enableSuggestions: false,
+            autocorrect: false,
+            keyboardType: TextInputType.visiblePassword, // Disable suggestions
+          ),
+          const SizedBox(height: 24),
+          FilledButton(
+            onPressed: _isSaving
+                ? null
+                : () async {
+                    if (_contentController.text.isNotEmpty) {
+                      setState(() {
+                        _isSaving = true;
+                      });
+                      try {
+                        await widget.onSave(_contentController.text);
+                        if (mounted) Navigator.pop(context);
+                      } catch (e) {
+                        setState(() {
+                          _isSaving = false;
+                        });
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Error saving: $e')),
+                          );
+                        }
+                      }
+                    }
+                  },
+            style: FilledButton.styleFrom(
+              minimumSize: const Size(double.infinity, 56),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+            ),
+            child: _isSaving
+                ? const SizedBox(
+                    height: 20,
+                    width: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Text('Encrypt & Save'),
+          ),
+          const SizedBox(height: 24),
+        ],
       ),
     );
   }

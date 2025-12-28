@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../../features/notes/note_model.dart';
 
 class DatabaseService {
@@ -12,6 +13,8 @@ class DatabaseService {
   DatabaseService._internal();
 
   Database? _database;
+  final _secureStorage = const FlutterSecureStorage();
+  static const _dbKeyName = 'sqlcipher_db_key';
 
   Future<Database> get database async {
     if (_database != null) return _database!;
@@ -19,14 +22,23 @@ class DatabaseService {
     return _database!;
   }
 
+  Future<String> _getOrCreateDbKey() async {
+    String? key = await _secureStorage.read(key: _dbKeyName);
+    if (key == null) {
+      // Generate a random 32-character key
+      final random = Random.secure();
+      final values = List<int>.generate(32, (i) => random.nextInt(256));
+      key = base64UrlEncode(values);
+      await _secureStorage.write(key: _dbKeyName, value: key);
+    }
+    return key;
+  }
+
   Future<Database> _initDatabase() async {
     final documentsDirectory = await getApplicationDocumentsDirectory();
     final path = join(documentsDirectory.path, 'secure_notes.db');
 
-    // In a real app, this key should be more securely managed.
-    // But since we have row-level encryption with Argon2id,
-    // this provides the "Full Binary Encryption" layer.
-    const dbKey = 'static_internal_key_for_sqlcipher';
+    final dbKey = await _getOrCreateDbKey();
 
     return await openDatabase(
       path,
